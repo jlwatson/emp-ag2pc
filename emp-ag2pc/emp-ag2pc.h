@@ -1,5 +1,6 @@
 
 #include "emp-ag2pc/2pc.h"
+#include "emp-ag2pc/2pc_dist.h"
 #include "emp-ag2pc/helper.h"
 #include "emp-ag2pc/amortized_2pc.h"
 #include "emp-ag2pc/feq.h"
