@@ -4,19 +4,30 @@
 #include <emp-tool/emp-tool.h>
 #include <boost/mpi/environment.hpp>
 #include <boost/mpi/communicator.hpp>
-#include <boost/archive/text_oarchive.hpp>
-#include <boost/archive/text_iarchive.hpp>
 namespace mpi = boost::mpi;
 using std::flush;
 using std::cout;
 using std::endl;
 //#define __debug
+BOOST_IS_BITWISE_SERIALIZABLE(emp::block)
+
+
+// NOTE(romilb): If serialization gives troubles, try the below code.
+// BOOST_SERIALIZATION_SPLIT_FREE(emp::block)
+// namespace boost { namespace serialization {
+//        template<class Archive>
+//        void save(Archive& ar, const emp::block& m, unsigned int) {
+//            ar << m;
+//        }
+//        template<class Archive>
+//        void load(Archive& ar, emp::block& m, unsigned int) {
+//            ar >> m;
+//        }
+//    }} // namespace boost::serialization
 
 namespace emp {
 class C2PCDist { public:
-    friend class boost::serialization::access;
-
-	const static int SSP = 5;//5*8 in fact...
+    const static int SSP = 5;//5*8 in fact...
 	const block MASK = makeBlock(0x0ULL, 0xFFFFFULL);
 	Fpre* fpre = nullptr;
 	block * mac = nullptr;
@@ -38,6 +49,10 @@ class C2PCDist { public:
 	NetIO * io;
 	int num_ands = 0;
 	int party, total_pre;
+
+    C2PCDist() {
+
+    }
 
     C2PCDist(NetIO * io, int party, CircuitFile * cf) {
 		this->party = party;
@@ -101,6 +116,7 @@ class C2PCDist { public:
 	block * ANDS_mac = nullptr;
 	block * ANDS_key = nullptr;
 	bool * ANDS_value = nullptr;
+
 	void function_independent() {
 		if(party == ALICE)
 			prg.random_block(labels, cf->num_wire);
@@ -523,9 +539,9 @@ class C2PCDist { public:
 
         // Evaluate circuit
         if(party == BOB) {
-            bob_parallel_evaluate(input, mask_input, cf,
-                                  party, mask, labels,
-                                  GT, GTK, GTM, GTv, fpre, prp);
+            bob_parallel_evaluate(input, mask_input, cf->num_gate, cf->gates,
+                                  party, labels,
+                                  GT, GTK, GTM, GTv, fpre->Delta);
 
             // Unmask
             bob_unmask_output(output, mask_input);
@@ -586,18 +602,14 @@ class C2PCDist { public:
         }
     }
 
-    static void bob_parallel_evaluate(bool * input, uint8_t * mask_input, CircuitFile * cf,
-                                  int party, bool * mask, block * labels,
+    static void bob_parallel_evaluate(bool * input, uint8_t * mask_input, int cf_num_gates, int * gates,
+                                  int party, block * labels,
                                   block (* GT)[4][2], block (* GTK)[4], block (* GTM)[4], bool (* GTv)[4],
-                                  Fpre* fpre, PRP prp) {
-	    // returns mask_input
+                                  block fpreDelta) {
+	    // updates mask_input and labels
         if(party == BOB) {
+            PRP prp;
             const block MASK = makeBlock(0x0ULL, 0xFFFFFULL);
-            mpi::environment env;
-            mpi::communicator world;
-
-            std::cout << "I am process " << world.rank() << " of " << world.size()
-                      << "." << std::endl;
             #ifdef __debug
                 for(int i = 0; i < cf->n1+cf->n2; ++i)
                     check2(mac[i], key[i], value[i]);
@@ -605,39 +617,91 @@ class C2PCDist { public:
 
             int ands = 0;
 
-            for (int i = 0; i < cf->num_gate; ++i) {
-                if (cf->gates[4 * i + 3] == XOR_GATE) {
-                    labels[cf->gates[4 * i + 2]] = xorBlocks(labels[cf->gates[4 * i]], labels[cf->gates[4 * i + 1]]);
-                    mask_input[cf->gates[4 * i + 2]] = logic_xor(mask_input[cf->gates[4 * i]],
-                                                                 mask_input[cf->gates[4 * i + 1]]);
-                } else if (cf->gates[4 * i + 3] == AND_GATE) {
-                    int index = 2 * mask_input[cf->gates[4 * i]] + mask_input[cf->gates[4 * i + 1]];
+            for (int i = 0; i < cf_num_gates; ++i) {
+                if (gates[4 * i + 3] == XOR_GATE) {
+                    labels[gates[4 * i + 2]] = xorBlocks(labels[gates[4 * i]], labels[gates[4 * i + 1]]);
+                    mask_input[gates[4 * i + 2]] = logic_xor(mask_input[gates[4 * i]],
+                                                             mask_input[gates[4 * i + 1]]);
+                } else if (gates[4 * i + 3] == AND_GATE) {
+                    int index = 2 * mask_input[gates[4 * i]] + mask_input[gates[4 * i + 1]];
                     block H[2];
-                    Hash(H, labels[cf->gates[4 * i]], labels[cf->gates[4 * i + 1]], i, index, prp);
+                    Hash(H, labels[gates[4 * i]], labels[gates[4 * i + 1]], i, index, prp);
                     GT[ands][index][0] = xorBlocks(GT[ands][index][0], H[0]);
                     GT[ands][index][1] = xorBlocks(GT[ands][index][1], H[1]);
 
-                    block ttt = xorBlocks(GTK[ands][index], fpre->Delta);
+                    block ttt = xorBlocks(GTK[ands][index], fpreDelta);
                     ttt = _mm_and_si128(ttt, MASK);
                     GTK[ands][index] = _mm_and_si128(GTK[ands][index], MASK);
                     GT[ands][index][0] = _mm_and_si128(GT[ands][index][0], MASK);
 
                     if (block_cmp(&GT[ands][index][0], &GTK[ands][index], 1))
-                        mask_input[cf->gates[4 * i + 2]] = false;
+                        mask_input[gates[4 * i + 2]] = false;
                     else if (block_cmp(&GT[ands][index][0], &ttt, 1))
-                        mask_input[cf->gates[4 * i + 2]] = true;
+                        mask_input[gates[4 * i + 2]] = true;
                     else cout << ands << "no match GT!" << endl;
-                    mask_input[cf->gates[4 * i + 2]] = logic_xor(mask_input[cf->gates[4 * i + 2]], GTv[ands][index]);
+                    mask_input[gates[4 * i + 2]] = logic_xor(mask_input[gates[4 * i + 2]], GTv[ands][index]);
 
-                    labels[cf->gates[4 * i + 2]] = xorBlocks(GT[ands][index][1], GTM[ands][index]);
+                    labels[gates[4 * i + 2]] = xorBlocks(GT[ands][index][1], GTM[ands][index]);
                     ands++;
                 } else {
-                    mask_input[cf->gates[4 * i + 2]] = not mask_input[cf->gates[4 * i]];
-                    labels[cf->gates[4 * i + 2]] = labels[cf->gates[4 * i]];
+                    mask_input[gates[4 * i + 2]] = not mask_input[gates[4 * i]];
+                    labels[gates[4 * i + 2]] = labels[gates[4 * i]];
                 }
             }
         }
     }
 };
+
+    class C2PCDist_state { public:
+        block fpreDelta;
+        int cf_num_gates;
+        int cf_num_wires;
+        int num_ands;
+        std::vector<int> gates;
+        int party;
+        std::vector<block> labels;
+
+        // n-d arrays flattened to 1d
+        std::vector<block> GTK;
+        std::vector<block> GTM;
+        std::vector<bool> GTv;
+        std::vector<block> GT;
+
+        friend class boost::serialization::access;
+
+        C2PCDist_state(){
+
+        }
+
+        C2PCDist_state(C2PCDist c2pc) {
+            fpreDelta = c2pc.fpre->Delta;
+            cf_num_gates = c2pc.cf->num_gate;
+            cf_num_wires = c2pc.cf->num_gate;
+            num_ands = c2pc.num_ands;
+            gates = std::vector<int>(c2pc.cf->gates, c2pc.cf->gates + cf_num_gates*4);
+            party = c2pc.party;
+            labels = std::vector<block>(c2pc.labels, c2pc.labels + cf_num_wires);
+            GTK = std::vector<block>(*c2pc.GTK, *c2pc.GTK + 4*num_ands);
+            GTM = std::vector<block>(*c2pc.GTM, *c2pc.GTM + 4*num_ands);
+            GTv = std::vector<bool>(*c2pc.GTv, *c2pc.GTv + 4*num_ands);
+            GT = std::vector<block>(**c2pc.GT, **c2pc.GT + 4*2*num_ands);
+        }
+
+        template<class Archive>
+        void serialize(Archive & ar, const unsigned int version)
+        {
+            ar & fpreDelta;
+            ar & cf_num_gates;
+            ar & cf_num_wires;
+            ar & num_ands;
+            ar & gates;
+            ar & party;
+            ar & labels;
+            ar & GTK;
+            ar & GTM;
+            ar & GTv;
+            ar & GT;
+        }
+    };
 }
 #endif// C2PCDist_H__
