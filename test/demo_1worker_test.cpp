@@ -8,16 +8,16 @@ using namespace std;
 using namespace emp;
 
 int main(int argc, char** argv) {
-
     mpi::environment env;
     mpi::communicator world;
 
+    cout << "Starting\n";
     int port, party;
     parse_party_and_port(argv, &party, &port);
 
     C2PCDist * twopc = nullptr;
     NetIO *io = nullptr;
-    string file = circuit_file_location + "/sort.txt";
+    string file = "/home/romilb/ckts/test.txt";
     CircuitFile cf(file.c_str());
 
     // Perform the pre-processing steps in the main process
@@ -40,17 +40,14 @@ int main(int argc, char** argv) {
     }
 
     // Define inputs
-    bool in[64], out[64];
+    bool in[2], out[2];
     memset(in, 0, sizeof(in));
     memset(out, 0, sizeof(out));
 
-    if (party == ALICE) {
-        /* 2 */
-        in[6] = true;
-    } else {
-        /* 4 */
-        in[34] = true;
-    }
+    if (party == ALICE)
+        in[0] = true;
+    else
+        in[1] = true;
 
     // Run circuit
     cout << "Inputs ready, starting online phase.\n";
@@ -61,21 +58,17 @@ int main(int argc, char** argv) {
 
     // Print the results in the master process
     if (world.rank() == 0) {
+
         string input = "";
-        for (int i = 0; i < 64; ++i) {
-            if (i % 32 == 0) {
-                input += " ";
-            }
+        for (int i = 0; i < 2; ++i) {
             input += (in[i] ? "1" : "0");
         }
 
         string res = "";
-        for (int i = 0; i < 64; ++i) {
-            if (i % 32 == 0) {
-                res += " ";
-            }
+        for (int i = 0; i < 2; ++i) {
             res += (out[i] ? "1" : "0");
         }
+
         cout << "party:" << party << ", input: " << input << endl;
         cout << "party:" << party << ", result: " << res << endl;
 
@@ -123,6 +116,10 @@ void run_evaluation(C2PCDist_state *state, bool *input, uint8_t *mask_input, blo
             GTv[i][j] = state->GTv[i*4 + j];
         }
     }
+
+    cout<<"Done deserializing.\n";
+    cout << state->cf_num_gates;
+    fflush(stdout);
     C2PCDist::bob_parallel_evaluate(input, mask_input, state->cf_num_gates, gates,
                                     state->party, labels,
                                     GT, GTK, GTM, GTv, state->fpreDelta);
@@ -152,6 +149,7 @@ void parallel_online(C2PCDist *twopc, int party, bool *input, bool *output) {
     if (world.rank() == 0) {
         // Alice sends the partial shares and bob updates labels
         twopc->send_recv_masks(input, mask_input);
+        cout<<"Send recv done.\n";
         if (party == BOB) {
             // Update state on workers once send recv is done
             world.send(1, 42, mask_input, num_wires);
@@ -173,13 +171,17 @@ void parallel_online(C2PCDist *twopc, int party, bool *input, bool *output) {
     if(party == BOB) {
         if (world.rank() == 1) {
             // Worker process runs the evaluation
+            cout<<"Starting ckt evaluation.\n";
             block * new_labels = nullptr;
             run_evaluation(&state, input, mask_input, new_labels);
             world.send(0, 44, mask_input, num_wires);
+            cout<<"Ckt evaluation done.\n";
         }
         if (world.rank() == 0) {
             // Master process receives masks and unmasks to get final result
+            cout<<"Master waiting for new masks.\n";
             world.recv(1, 44, mask_input, num_wires);
+            cout<<"Ckt unmasking start.\n";
             twopc->bob_unmask_output(output, mask_input);
         }
     }

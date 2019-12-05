@@ -618,8 +618,18 @@ class C2PCDist { public:
             int ands = 0;
 
             for (int i = 0; i < cf_num_gates; ++i) {
+                cout<<"Processing gate " << i << endl;
+                fflush(stdout);
                 if (gates[4 * i + 3] == XOR_GATE) {
+//                    cout<<"Processing XOR gate " << i << endl;
+//                    cout<<"data ";
+//                    cout<<gates[4 * i + 2];
+//                    fflush(stdout);
                     labels[gates[4 * i + 2]] = xorBlocks(labels[gates[4 * i]], labels[gates[4 * i + 1]]);
+//                    cout<<"Labels done." << i << endl;
+//                    cout<<"data again ";
+//                    cout<<gates[4 * i + 2];
+//                    fflush(stdout);
                     mask_input[gates[4 * i + 2]] = logic_xor(mask_input[gates[4 * i]],
                                                              mask_input[gates[4 * i + 1]]);
                 } else if (gates[4 * i + 3] == AND_GATE) {

@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
 
     C2PCDist * twopc = nullptr;
     NetIO *io = nullptr;
-    string file = circuit_file_location + "/sort.txt";
+    string file = "/home/romilb/ckts/sort.txt";
     CircuitFile cf(file.c_str());
 
     // Perform the pre-processing steps in the main process
@@ -124,8 +124,8 @@ void run_evaluation(C2PCDist_state *state, bool *input, uint8_t *mask_input, blo
         }
     }
     C2PCDist::bob_parallel_evaluate(input, mask_input, state->cf_num_gates, gates,
-                                 state->party, labels,
-                                 GT, GTK, GTM, GTv, state->fpreDelta);
+                                    state->party, labels,
+                                    GT, GTK, GTM, GTv, state->fpreDelta);
     updated_labels = labels;
 }
 
