@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     fflush(stdout);
     auto t_parallel = clock_start();
     parallel_online(twopc, party, in, out);
-    cout << "online:\t" << party << "\t" << time_from(t_parallel) << endl;
+    cout << "online:\t party: " << party << "\trank: " << world.rank() << "\t time: " << time_from(t_parallel) << endl;
 
     // Print the results in the master process
     if (world.rank() == 0) {
