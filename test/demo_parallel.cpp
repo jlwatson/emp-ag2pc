@@ -1,6 +1,7 @@
 #include <emp-tool/emp-tool.h>
 #include "test/single_execution.h"
 #include <boost/mpi.hpp>
+#include <boost/serialization/vector.hpp>
 
 void parallel_online(C2PCDist *twopc, int party, bool *input, bool *output);
 
@@ -17,7 +18,8 @@ int main(int argc, char** argv) {
 
     C2PCDist * twopc = nullptr;
     NetIO *io = nullptr;
-    string file = circuit_file_location + "/sort.txt";
+    string file = "../circuits/partitioned_circuits/simple/simple.txt";
+    std::cout << file << std::endl << std::flush;
     CircuitFile cf(file.c_str());
 
     // Perform the pre-processing steps in the main process
@@ -154,9 +156,13 @@ void parallel_online(C2PCDist *twopc, int party, bool *input, bool *output) {
         twopc->send_recv_masks(input, mask_input);
         if (party == BOB) {
             // Update state on workers once send recv is done
+            cout << "sending mask input" << endl << flush;
             world.send(1, 42, mask_input, num_wires);
+            cout << "DONE sending mask input" << endl << flush;
             state = C2PCDist_state(*twopc);
+            cout << "sending state" << endl << flush;
             world.send(1, 43, state);
+            cout << "done sending state" << endl << flush;
         }
     }
     else{
