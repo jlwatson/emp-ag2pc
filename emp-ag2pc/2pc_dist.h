@@ -4,6 +4,7 @@
 #include <emp-tool/emp-tool.h>
 #include <boost/mpi/environment.hpp>
 #include <boost/mpi/communicator.hpp>
+#include <boost/serialization/vector.hpp>
 namespace mpi = boost::mpi;
 using std::flush;
 using std::cout;
@@ -11,19 +12,18 @@ using std::endl;
 //#define __debug
 BOOST_IS_BITWISE_SERIALIZABLE(emp::block)
 
-
 // NOTE(romilb): If serialization gives troubles, try the below code.
 // BOOST_SERIALIZATION_SPLIT_FREE(emp::block)
-// namespace boost { namespace serialization {
-//        template<class Archive>
-//        void save(Archive& ar, const emp::block& m, unsigned int) {
-//            ar << m;
-//        }
-//        template<class Archive>
-//        void load(Archive& ar, emp::block& m, unsigned int) {
-//            ar >> m;
-//        }
-//    }} // namespace boost::serialization
+//namespace boost { namespace serialization {
+//    template<class Archive>
+//    void save(Archive& ar, const emp::block& m, unsigned int) {
+//        ar << m;
+//    }
+//    template<class Archive>
+//    void load(Archive& ar, emp::block& m, unsigned int) {
+//        ar >> m;
+//    }
+//}} // namespace boost::serialization
 
 namespace emp {
 class C2PCDist { public:
