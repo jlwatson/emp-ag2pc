@@ -3,6 +3,13 @@
 #include <boost/mpi.hpp>
 #include <boost/serialization/vector.hpp>
 
+#define MPI_MASK_INPUT_REQUEST 42
+#define MPI_MASK_INPUT_RESPONSE 43
+#define MPI_MASK_LABEL_RESPONSE 44
+
+#define MPI_MASK_OUTPUT_WIRE_IDX 62
+#define MPI_MASK_OUTPUT_VALUE 63
+
 void parallel_online(C2PCDist *twopc, int party, bool *input, bool *output);
 
 using namespace std;
@@ -18,12 +25,24 @@ int main(int argc, char** argv) {
 
     C2PCDist * twopc = nullptr;
     NetIO *io = nullptr;
-    string file = "../circuits/partitioned_circuits/simple/simple.txt";
-    std::cout << file << std::endl << std::flush;
-    CircuitFile cf(file.c_str());
+    string prefix = "../circuits/partitioned_circuits/simple/simple";
+
+    CircuitFile *cf = nullptr;
+    if (party == ALICE || world.rank() == 0) {
+        cf = new CircuitFile((prefix + ".txt").c_str()); 
+    }
+
+    // Read partitioned circuit files
+    PartitionFile* partition_file = nullptr;
+    MetadataFile *meta_file = nullptr;
+    if (party == BOB) {
+        partition_file = new PartitionFile((prefix + "-" + world.rank() + ".txt")); 
+        meta_file = new MetadataFile((prefix + "-" + world.rank() + "-meta.txt"));
+    }
 
     // Perform the pre-processing steps in the main process
-    if (world.rank() == 0) {
+    if (party == ALICE || world.rank() == 0) {
+
         NetIO *io = new NetIO(party == ALICE ? nullptr : IP, port);
         io->set_nodelay();
         auto t1 = clock_start();
@@ -41,30 +60,35 @@ int main(int argc, char** argv) {
         cout << "dep:\t" << party << "\t" << time_from(t1) << endl;
     }
 
-    // Define inputs
-    bool in[64], out[64];
-    memset(in, 0, sizeof(in));
-    memset(out, 0, sizeof(out));
-
+    // Define inputs/outputs
+    bool *in = calloc(cf->n1, sizeof(bool));
+    bool *out = calloc(cf->n3, sizeof(bool));
     if (party == ALICE) {
-        /* 2 */
-        in[6] = true;
-    } else {
-        /* 4 */
-        in[34] = true;
+
+        // Set input values
+        // in[0] = true;
+
+    } else { // BOB
+
+        // Set input values
+        // XXX: note that we are assuming we know which bits go with which rank process
+        // if (world.rank() == n) {
+        //     in[0] = true;
+        // }
     }
 
     // Run circuit
     cout << "Inputs ready, starting online phase.\n";
     fflush(stdout);
     auto t_parallel = clock_start();
-    parallel_online(twopc, party, in, out);
+    // get all result bits back to rank 0 on both sides (Alice is just doing it locally anyway)
+    parallel_online(twopc, party, in, out, partition_file, meta_file, env, world);
     cout << "online:\t" << party << "\t" << time_from(t_parallel) << endl;
 
     // Print the results in the master process
     if (world.rank() == 0) {
         string input = "";
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < party == ALICE ? cf->n1 : cf->n2; ++i) {
             if (i % 32 == 0) {
                 input += " ";
             }
@@ -72,30 +96,90 @@ int main(int argc, char** argv) {
         }
 
         string res = "";
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < cf->n3; ++i) {
             if (i % 32 == 0) {
                 res += " ";
             }
             res += (out[i] ? "1" : "0");
         }
-        cout << "party:" << party << ", input: " << input << endl;
-        cout << "party:" << party << ", result: " << res << endl;
+        cout << "party: " << party << ", input:  " << input << endl;
+        cout << "party: " << party << ", result: " << res << endl;
 
         delete io;
     }
     return 0;
 }
 
-void run_evaluation(C2PCDist_state *state, bool *input, uint8_t *mask_input, block * updated_labels){
-    // Deserialize the state vectors and run the circuit:
-    int gates[state->cf_num_gates*4];
+void run_evaluation(C2PCDist *twopc, int party, bool *input, uint8_t *partition_mask_input, block *partition_labels, block *updated_labels, PartitionFile *partition_file, MetadataFile *meta_file, mpi::environment &env, mpi::communicator &world){
+
+    // MPI get or deserialize the state vectors and run the circuit:
+
+    // XXX: replace with partition_file->gates
+    /*
+    int gates[partition_file->num_partition_gate * 4];
     for (int i = 0; i < state->cf_num_gates*4; i++)
         gates[i] = state->gates[i];
+    */
 
+    // XXX: replace with partition_labels
+    /*
     block labels[state->cf_num_wires];
     for (int i = 0; i < state->cf_num_wires; i++)
         labels[i] = state->labels[i];
+    */
 
+    block *GT;
+    block *GTK;
+    block *GTM;
+    block *GTv;
+    block *fpreDelta;
+
+    if (world.rank() == 0) {
+        GT = &twopc->GT;
+        GTK = &twopc->GTK;
+        GTM = &twopc->GTM;
+        GTv = &twopc->GTv;
+        fpreDelta = &twopc->fpreDelta;
+    } else {
+        GT = new block[partition_file->num_partition_and][4][2];
+        GTK = new block[partition_file->num_partition_and][4];
+        GTM = new block[partition_file->num_partition_and][4];
+        GTv = new block[partition_file->num_partition_and][4];
+        fpreDelta = new block;
+    }
+
+    if (world.rank() == 0) {
+        for (int i = 0; i < twopc->num_ands - partition_file->num_partition_and; i++) {
+            int and_gate_index;
+            mpi::status s = world.recv(mpi::any_source, MPI_G_REQUEST, &and_gate_index);
+            world.send(s.source(), MPI_G_GT_RESPONSE, &twopc->GT[and_gate_index], 4*2);
+            world.send(s.source(), MPI_G_GTK_RESPONSE, &twopc->GTK[and_gate_index], 4);
+            world.send(s.source(), MPI_G_GTM_RESPONSE, &twopc->GTM[and_gate_index], 4);
+            world.send(s.source(), MPI_G_GTv_RESPONSE, &twopc->GTv[and_gate_index], 4);
+        }
+
+        for (int i = 0; i < world.size(); i++) {
+            mpi::status s = world.recv(mpi::any_source, MPI_FPREDELTA_REQUEST);
+            world.send(s.source(), MPI_FPREDELTA_RESPONSE, &twopc->fpreDelta);
+        }
+
+    } else { // receive responses
+        for (int i = 0; i < partition_file->num_partition_gate; i++) {
+            if (partition_file->gates[i * 4 + 3] == AND_GATE) {
+                int global_and_gate_index = partition_file->local_and_gate_idx_to_global[i];
+                world.send(0, MPI_G_REQUEST, &global_and_gate_index);
+                world.recv(0, MPI_G_GT_RESPONSE, &GT[global_and_gate_index], 4*2);
+                world.recv(0, MPI_G_GTK_RESPONSE, &GTK[global_and_gate_index], 4);
+                world.recv(0, MPI_G_GTM_RESPONSE, &GTK[global_and_gate_index], 4);
+                world.recv(0, MPI_G_GTv_RESPONSE, &GTK[global_and_gate_index], 4);
+            }
+        }
+
+        world.send(0, MPI_FPREDELTA_REQUEST);
+        world.recv(0, MPI_FPREDELTA_RESPONSE, &fpreDelta);
+    }
+
+    /*
     block GT[state->num_ands][4][2];
     for (int i = 0; i < state->num_ands; i++){
         for (int j = 0; j < 4; j++){
@@ -125,67 +209,84 @@ void run_evaluation(C2PCDist_state *state, bool *input, uint8_t *mask_input, blo
             GTv[i][j] = state->GTv[i*4 + j];
         }
     }
-    C2PCDist::bob_parallel_evaluate(input, mask_input, state->cf_num_gates, gates,
-                                    state->party, labels,
-                                    GT, GTK, GTM, GTv, state->fpreDelta);
-    updated_labels = labels;
+    */
+
+    C2PCDist::bob_parallel_evaluate(input, partition_mask_input, partition_file, meta_file, party, partition_labels, GT, GTK, GTM, GTv, fpreDelta, env, world);
+    updated_labels = partition_labels;
 }
 
-void parallel_online(C2PCDist *twopc, int party, bool *input, bool *output) {
+void parallel_online(C2PCDist *twopc, int party, bool *input, bool *output, PartitionFile *partition_file, MetadataFile *meta_file, mpi::environment &env, mpi::communicator &world) {
     // The master sends/recvs masks with the other party, broadcasts state to the workers
     // worker runs the complete circuit, broadcasts the results and the master unmasks the output.
-
-    mpi::environment env;
-    mpi::communicator world;
-
-    cout<<"Start parallel online phase.\n";
+    cout << "Start parallel online phase." << endl;
     fflush(stdout);
-    int num_wires;
-    if (world.rank() == 0) {
-        num_wires = twopc->cf->num_wire;
-    }
-    broadcast(world, num_wires, 0);
 
-    uint8_t *mask_input = new uint8_t[num_wires];
-    memset(mask_input, 0, num_wires);
+    int *partition_mask_input = new uint8_t[num_partition_wire];
+    memset(partition_mask_input, 0, num_partition_wire);
 
-    C2PCDist_state state;
+    int *partition_labels = new uint8_t[num_partition_wire];
+    memset(partition_labels, 0, num_partition_wire);
+
+    int *mask_input = nullptr; // only valid for rank 0
 
     if (world.rank() == 0) {
+        int num_wires = partition_file->num_wires;
+        mask_input = new uint8_t[num_wires];
+        memset(mask_input, 0, num_wires);
+
         // Alice sends the partial shares and bob updates labels
         twopc->send_recv_masks(input, mask_input);
         if (party == BOB) {
-            // Update state on workers once send recv is done
-            cout << "sending mask input" << endl << flush;
-            world.send(1, 42, mask_input, num_wires);
-            cout << "DONE sending mask input" << endl << flush;
-            state = C2PCDist_state(*twopc);
-            cout << "sending state" << endl << flush;
-            world.send(1, 43, state);
-            cout << "done sending state" << endl << flush;
-        }
-    }
-    else{
-        // Worker process in bob waits for state from master
-        if (party == BOB) {
-            if (world.rank() == 1) {
-                world.recv(0, 42, mask_input, num_wires);   // 42 is a random tag, it can be any int.
-                world.recv(0, 43, state);
+            // Update mask input state on workers once send recv is done
+            
+            n_inputs_sent = 0;
+            // while we haven't distributed all the input wires to other workers
+            while (n_inputs_sent < (partition_file->num_alice_inputs + partition_file->num_bob_inputs) - meta_file->num_input_wires) {
+                int wire_index;
+                mpi::status s = world.recv(mpi::any_source, MPI_MASK_INPUT_REQUEST, &wire_index);
+                world.send(s.source(), MPI_MASK_INPUT_RESPONSE, &mask_input[wire_index]);
+                world.send(s.source(), MPI_MASK_LABEL_RESPONSE, &twopc->labels[wire_index]);
+                n_inputs_sent++;
             }
         }
     }
 
-    // Evaluate circuit
-    if(party == BOB) {
-        if (world.rank() == 1) {
-            // Worker process runs the evaluation
-            block * new_labels = nullptr;
-            run_evaluation(&state, input, mask_input, new_labels);
-            world.send(0, 44, mask_input, num_wires);
+    // Worker process in bob (including rank 0) waits for state from rank 0
+    if (party == BOB) {
+        for (auto &kvpair : partition_file->global_wire_idx_to_local) {
+            int global_wire_idx = kvpair.first;
+            if (global_wire_idx < partition_file->num_alice_inputs + partition_file->num_bob_inputs) {
+                if (world.rank() == 0) {
+                    partition_mask_input[kvpair.second] = mask_input[global_wire_idx];
+                } else {
+                    world.send(0, MPI_MASK_INPUT_REQUEST, &global_wire_idx);
+                    world.recv(0, MPI_MASK_INPUT_RESPONSE, &partition_mask_input[kvpair.second]);
+                    world.recv(0, MPI_MASK_LABEL_RESPONSE, &partition_labels[kvpair.second]);
+                }
+            }
         }
-        if (world.rank() == 0) {
-            // Master process receives masks and unmasks to get final result
-            world.recv(1, 44, mask_input, num_wires);
+
+        // Evaluate the circuit partition
+        // Worker process runs the evaluation
+        block * new_labels = nullptr;
+        run_evaluation(twopc, party, input, partition_mask_input, partition_labels, new_labels, partition_file, meta_file, env, world);
+
+        // Send output bit masks to rank 0
+        if (world.rank() != 0) {
+            for (auto &kvpair : partition_file->global_wire_idx_to_local) {
+                int global_wire_idx = kvpair.first;
+                if (global_wire_idx > partition_file->num_wires - partition_file->num_outputs) {
+                    world.send(0, MPI_MASK_OUTPUT_WIRE_IDX, &global_wire_idx);
+                    world.send(0, MPI_MASK_OUTPUT_VALUE, &partition_mask_input[kvpair.second]);
+                }
+            }
+        } else { // rank == 0
+            for (int i = 0; i < partition_file->num_outputs - meta_file->num_output_wires; i++) {
+                int wire_idx;
+                mpi::source s = world.recv(mpi::any_source, MPI_MASK_OUTPUT_WIRE_IDX, &wire_idx);
+                world.recv(s.source(), MPI_MASK_OUTPUT_VALUE, &mask_input[wire_idx]);
+            }
+
             twopc->bob_unmask_output(output, mask_input);
         }
     }
