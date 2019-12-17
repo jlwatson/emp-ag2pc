@@ -602,60 +602,124 @@ class C2PCDist { public:
         }
     }
 
-    static void bob_parallel_evaluate(bool * input, uint8_t * mask_input, int cf_num_gates, int * gates,
-                                  int party, block * labels,
+    static void evaluate_gate(int i, int &ands, block fpreDelta, PartitionFile *partition_file, block *labels, uint8_t *mask_input, PRP &prp,
+                                  block (* GT)[4][2], block (* GTK)[4], block (* GTM)[4], bool (* GTv)[4]) {
+
+        const block MASK = makeBlock(0x0ULL, 0xFFFFFULL);
+
+        int *gates = partition_file->gates;
+        if (gates[4 * i + 3] == XOR_GATE) {
+            labels[gates[4 * i + 2]] = xorBlocks(labels[gates[4 * i]], labels[gates[4 * i + 1]]);
+            mask_input[gates[4 * i + 2]] = logic_xor(mask_input[gates[4 * i]],
+                                                     mask_input[gates[4 * i + 1]]);
+        } else if (gates[4 * i + 3] == AND_GATE) {
+            int index = 2 * mask_input[gates[4 * i]] + mask_input[gates[4 * i + 1]];
+            block H[2];
+            Hash(H, labels[gates[4 * i]], labels[gates[4 * i + 1]], i, index, prp);
+            GT[ands][index][0] = xorBlocks(GT[ands][index][0], H[0]);
+            GT[ands][index][1] = xorBlocks(GT[ands][index][1], H[1]);
+
+            block ttt = xorBlocks(GTK[ands][index], fpreDelta);
+            ttt = _mm_and_si128(ttt, MASK);
+            GTK[ands][index] = _mm_and_si128(GTK[ands][index], MASK);
+            GT[ands][index][0] = _mm_and_si128(GT[ands][index][0], MASK);
+
+            if (block_cmp(&GT[ands][index][0], &GTK[ands][index], 1))
+                mask_input[gates[4 * i + 2]] = false;
+            else if (block_cmp(&GT[ands][index][0], &ttt, 1))
+                mask_input[gates[4 * i + 2]] = true;
+            else cout << ands << "no match GT!" << endl;
+            mask_input[gates[4 * i + 2]] = logic_xor(mask_input[gates[4 * i + 2]], GTv[ands][index]);
+
+            labels[gates[4 * i + 2]] = xorBlocks(GT[ands][index][1], GTM[ands][index]);
+            ands++;
+        } else {
+            mask_input[gates[4 * i + 2]] = not mask_input[gates[4 * i]];
+            labels[gates[4 * i + 2]] = labels[gates[4 * i]];
+        }
+    }
+
+    static void bob_parallel_evaluate(bool * input, uint8_t * partition_mask_input, PartitionFile *partition_file, MetadataFile *meta_file, int party,
+                                  block *partition_labels, 
                                   block (* GT)[4][2], block (* GTK)[4], block (* GTM)[4], bool (* GTv)[4],
-                                  block fpreDelta) {
+                                  block fpreDelta, mpi::environment &env, mpi::communicator &world) {
+
 	    // updates mask_input and labels
         if(party == BOB) {
             PRP prp;
-            const block MASK = makeBlock(0x0ULL, 0xFFFFFULL);
+            /*
             #ifdef __debug
                 for(int i = 0; i < cf->n1+cf->n2; ++i)
                     check2(mac[i], key[i], value[i]);
             #endif
+            */
 
             int ands = 0;
+            int num_gates_processed = 0;
 
-            for (int i = 0; i < cf_num_gates; ++i) {
-                cout<<"Processing gate " << i << endl;
-                fflush(stdout);
-                if (gates[4 * i + 3] == XOR_GATE) {
-//                    cout<<"Processing XOR gate " << i << endl;
-//                    cout<<"data ";
-//                    cout<<gates[4 * i + 2];
-//                    fflush(stdout);
-                    labels[gates[4 * i + 2]] = xorBlocks(labels[gates[4 * i]], labels[gates[4 * i + 1]]);
-//                    cout<<"Labels done." << i << endl;
-//                    cout<<"data again ";
-//                    cout<<gates[4 * i + 2];
-//                    fflush(stdout);
-                    mask_input[gates[4 * i + 2]] = logic_xor(mask_input[gates[4 * i]],
-                                                             mask_input[gates[4 * i + 1]]);
-                } else if (gates[4 * i + 3] == AND_GATE) {
-                    int index = 2 * mask_input[gates[4 * i]] + mask_input[gates[4 * i + 1]];
-                    block H[2];
-                    Hash(H, labels[gates[4 * i]], labels[gates[4 * i + 1]], i, index, prp);
-                    GT[ands][index][0] = xorBlocks(GT[ands][index][0], H[0]);
-                    GT[ands][index][1] = xorBlocks(GT[ands][index][1], H[1]);
+            std::map<int, mpi::request> input_requests;
+            std::map<int, std::vector<int>> pending_wires;
 
-                    block ttt = xorBlocks(GTK[ands][index], fpreDelta);
-                    ttt = _mm_and_si128(ttt, MASK);
-                    GTK[ands][index] = _mm_and_si128(GTK[ands][index], MASK);
-                    GT[ands][index][0] = _mm_and_si128(GT[ands][index][0], MASK);
+            for (int i = 0; i < partition_file->num_partition_gate; i++) {
+                int input_wire1 = partition_file->gates[4*i];
+                if (input_wire1 >= partition_file->num_alice_inputs + partition_file->num_bob_inputs) {
+                    pending_wires[i].push_back(input_wire1);
+                    // send request to worker
+                    if (meta_file->input_worker_map.contains(input_wire1) && !input_requests.contains(input_wire1)) { 
+                        input_requests[input_wire1] = world.irecv(meta_file->input_worker_map[input_wire1], MPI_INPUT_BIT_REQUEST, &input[input_wire1]);
+                    }
+                }
 
-                    if (block_cmp(&GT[ands][index][0], &GTK[ands][index], 1))
-                        mask_input[gates[4 * i + 2]] = false;
-                    else if (block_cmp(&GT[ands][index][0], &ttt, 1))
-                        mask_input[gates[4 * i + 2]] = true;
-                    else cout << ands << "no match GT!" << endl;
-                    mask_input[gates[4 * i + 2]] = logic_xor(mask_input[gates[4 * i + 2]], GTv[ands][index]);
+                int type = partition_file->gates[4*i + 3];
+                if (type == AND_GATE) {
+                    int input_wire2 = partition_file->gates[4*i + 1];
+                    if (input_wire2 >= partition_file->num_alice_inputs + partition_file->num_bob_inputs) {
+                        pending_wires[i].push_back(input_wire2);
+                        // send request to worker
+                        if (meta_file->input_worker_map.contains(input_wire2) && !input_requests.contains(input_wire2)) { 
+                            input_requests[input_wire2] = world.irecv(meta_file->input_worker_map[input_wire2], MPI_INPUT_BIT_REQUEST, &input[input_wire2]);
+                        }
+                    }
+                }
+            }
 
-                    labels[gates[4 * i + 2]] = xorBlocks(GT[ands][index][1], GTM[ands][index]);
-                    ands++;
-                } else {
-                    mask_input[gates[4 * i + 2]] = not mask_input[gates[4 * i]];
-                    labels[gates[4 * i + 2]] = labels[gates[4 * i]];
+            while (num_gates_processed < partition_file->num_partition_gate) {
+                //cout<<"Processing gate " << i << endl;
+                //fflush(stdout);
+                for (auto &wire_request_pair : input_requests) {
+                    mpi::request r = wire_request_pair.second;
+                    if (r.test()) {
+                        for (auto &gate_pending_bits_pair : pending_wires) {
+                            auto pos = std::find(gate_pending_bits_pair.second.begin(), gate_pending_bits_pair.second.end(), wire_request_pair.first);
+                            if (pos != gate_pending_bits_pair.second.end()) {
+                                gate_pending_bits_pair.second.erase(pos);
+                            }
+                        }
+                    }
+                }
+
+                for (auto &gate_pending_bits_pair : pending_wires) {
+                    if (gate_pending_bits_pair.second.empty()) { // evaluate the gate
+
+                        evaluate_gate(gate_pending_bits_pair.first, ands, fpreDelta, partition_file, partition_labels, partition_mask_input, prp,
+                                GT, GTK, GTM, GTv);
+
+                        num_gates_processed++;
+
+                        // remove output bits from pending map
+                        int output_wire = partition_file->gates[4*gate_pending_bits_pair.first + 2];
+                        for (auto &gate_pending_bits_pair2 : pending_wires) {
+                            auto pos = std::find(gate_pending_bits_pair2.second.begin(), gate_pending_bits_pair2.second.end(), output_wire);
+                            if (pos != gate_pending_bits_pair2.second.end()) {
+                                gate_pending_bits_pair2.second.erase(pos);
+                            }
+                        }
+
+                        // send output bit to other workers
+                        if (meta_file->output_worker_map.contains(output_wire)) {
+                            world.isend(meta_file->output_worker_map[output_wire], MPI_INPUT_BIT_REQUEST, &input[output_wire]);
+                        }
+                    }
                 }
             }
         }
